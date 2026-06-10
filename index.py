@@ -1,19 +1,22 @@
-import os
+import asyncio
+import json
 import logging
+import os
+import re
+from datetime import datetime, timezone
+
+import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
+
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from dotenv import load_dotenv
-# from urllib.parse import quote
-import requests
-import re
-import json
-from datetime import datetime, timezone
-from pydantic import BaseModel
+
 from db import (initDatabase, saveMemberAnalysis, markAsSentToSlack, close_database)
 
 load_dotenv()
@@ -52,6 +55,12 @@ class SlackAIAgent:
             api_key=os.getenv("OPENAI_API_KEY")
         )
         
+        self.socket_mode_handler = None
+        
+        app_token = os.getenv("SLACK_APP_TOKEN")
+        if app_token:
+            self.socket_mode_handler = SocketModeHandler(self.slack, app_token)
+        
         @self.slack.event('team_join')
         async def handle_team_join(event, logger):
             try:
@@ -83,7 +92,19 @@ class SlackAIAgent:
             except Exception as e:
                 logging.error(f'Error handling member_joined_channel: {e}')
     
-    def get_user_info(self, user_id: str) -> dict:
+    async def start(self):
+        await initDatabase()
+        
+        if self.socket_mode_handler:
+            asyncio.create_task(self.socket_mode_handler.start_async())
+            logging.info("Slack Socket Mode Handler Started")
+            
+    async def stop(self):
+        close_async = getattr(self.socket_mode_handler, "close_async", None)
+        if self.socket_mode_handler:
+            await close_async
+    
+    async def get_user_info(self, user_id: str) -> dict:
         result = self.web_client.users_info(user=user_id)
         user = result["user"]
 
@@ -102,7 +123,7 @@ class SlackAIAgent:
         }
         
         
-    async def analyzeAndPostMember(self, member_info: dict) -> dict:
+    async def analyzeAndPostMember(self, member_info: dict):
         analysisId = None
         
         try:
@@ -110,18 +131,17 @@ class SlackAIAgent:
             logging.info(f'Processing member: {member_info["name"]}')
             
             # Do research about the member
-            researchData = await self.doBasicResearch(member_info)
-            analysis = await self.analyzeWithAI(member_info, researchData)
-            
+            research_data = await self.doBasicResearch(member_info)
+            analysis = await self.analyzeWithAI(member_info, research_data)
             
             # Logging info
             logging.info(f'Saving analysis to database for {member_info["name"]}')
             
             # Save the analysis result
-            analysisId = await saveMemberAnalysis(member_info, analysis, researchData)
+            analysisId = await saveMemberAnalysis(member_info, analysis, research_data)
             
             # Post analysis to channel
-            await self.postAnalysisToChannel(member_info, analysis, researchData)
+            await self.postAnalysisToChannel(member_info, analysis, research_data)
             
             # If analysis return non empty, then mark as sent
             if analysisId:
@@ -167,8 +187,10 @@ class SlackAIAgent:
             
         except Exception as e:
             logging.error(f'Research error: {e}')
+            
+        return result
     
-    
+    @staticmethod
     def isPersonalEmail(email: str) -> bool:
         """
         Check whether email is personal or not by checking the domain
@@ -182,12 +204,11 @@ class SlackAIAgent:
         
         return domain in personalDomains
     
-    async def getCompanyInfo(domain: str):
+    async def getCompanyInfo(self, domain: str):
         """
         Get company info by accessing the domain
         """
-        
-        try:
+        def _fetch():
             response = requests.get(
                 f'https://www.{domain}',
                 timeout=5,
@@ -196,9 +217,15 @@ class SlackAIAgent:
                 }
             )
             
+            response.raise_for_status()
+            return response.text
+        
+        try:
+            html = await asyncio.to_thread(_fetch)
+            
             title_match = re.search(
                 r"<title>(.*?)</title>",
-                response.text,
+                html,
                 re.IGNORECASE | re.DOTALL
             )
             
@@ -215,20 +242,29 @@ class SlackAIAgent:
             logging.error(f'Could not fetch {domain}:', str(e))
     
     
-    async def getGithubInfo(name: str):
+    async def getGithubInfo(self, name: str):
         """
         Get Github info by searching the name on github
         """
         
-        try:
+        def _fetch():
             response = requests.get(
-                f'https://api.github.com/search/users?q="{name}"'
+                f'https://api.github.com/search/users',
+                params={"q": f'"{name}"'},
+                timeout=5,
+                headers={"Accept": "application/vnd.github+json"},
             )
             
-            data = response.json()
             
-            if data["items"] and len(data["items"]) > 0:
-                user = data["items"][0]
+            response.raise_for_status()
+            return response.text
+        
+        try:
+            data = await asyncio.to_thread(_fetch)
+            items = data.get("items", [])
+            
+            if items and len(items) > 0:
+                user = items[0]
                 
                 return {
                     "url": user["html_url"],
@@ -390,6 +426,14 @@ class SlackAIAgent:
         logging.info(f"Analysis posted to channel for {member['name']}")
     
     def setupFastAPIRoutes(self):
+        @self.app.on_event("startup")
+        async def startup():
+            await self.start()
+        
+        @self.app.on_event("shutdown")
+        async def shutdown():
+            await self.stop()
+        
         @self.app.get("/health")
         async def health():
             return {
