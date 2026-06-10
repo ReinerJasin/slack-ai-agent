@@ -1,6 +1,5 @@
-import os
 import logging
-import json
+import os
 
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
@@ -71,38 +70,83 @@ async def initDatabase():
         raise
     
     
-async def saveMemberAnalysis(member_info, analysis, researchData):
+async def saveMemberAnalysis(member_info, analysis, research_data):
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO member_analyses (
-                        member_id,
-                        member_name,
-                        member_email,
-                        member_title,
-                        member_timezone,
-                        fit_score,
-                        insights,
-                        recommendations,
-                        research_data
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
+                    SELECT id
+                    FROM member_analyses
+                    WHERE member_id = %s
+                    ORDER BY analyzed_at DESC, id DESC
+                    LIMIT 1
                     """,
-                    (
-                        member_info.get("id"),
-                        member_info["name"],
-                        member_info.get("email"),
-                        member_info.get("title"),
-                        member_info.get("timezone"),
-                        analysis["fit_score"],
-                        Jsonb(analysis["insights"]),
-                        Jsonb(analysis["recommendations"]),
-                        Jsonb(researchData),
-                    ),
+                    (member_info.get("id"),),
                 )
+                existing = await cur.fetchone()
+
+                if existing:
+                    await cur.execute(
+                        """
+                        UPDATE member_analyses
+                        SET
+                            member_name = %s,
+                            member_email = %s,
+                            member_title = %s,
+                            member_timezone = %s,
+                            fit_score = %s,
+                            insights = %s,
+                            recommendations = %s,
+                            research_data = %s,
+                            analyzed_at = CURRENT_TIMESTAMP,
+                            sent_to_slack = FALSE,
+                            sent_to_slack_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (
+                            member_info["name"],
+                            member_info.get("email"),
+                            member_info.get("title"),
+                            member_info.get("timezone"),
+                            analysis["fitScore"],
+                            Jsonb(analysis["insights"]),
+                            Jsonb(analysis["recommendations"]),
+                            Jsonb(research_data),
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        INSERT INTO member_analyses (
+                            member_id,
+                            member_name,
+                            member_email,
+                            member_title,
+                            member_timezone,
+                            fit_score,
+                            insights,
+                            recommendations,
+                            research_data
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (
+                            member_info.get("id"),
+                            member_info["name"],
+                            member_info.get("email"),
+                            member_info.get("title"),
+                            member_info.get("timezone"),
+                            analysis["fit_score"],
+                            Jsonb(analysis["insights"]),
+                            Jsonb(analysis["recommendations"]),
+                            Jsonb(research_data),
+                        ),
+                    )
                 
                 result = await cur.fetchone()
                 
@@ -112,7 +156,7 @@ async def saveMemberAnalysis(member_info, analysis, researchData):
         
         logging.info(f'Saved analysis to database with ID: {analysis_id}')
         
-        return analysis
+        return analysis_id
         
     except Exception as error:
         logging.error(f'Failed to initialize database: {error}')

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import requests
@@ -39,9 +40,6 @@ class Logger:
 # Agent Class
 class SlackAIAgent:
     def __init__(self):
-        self.app = FastAPI()
-        self.setupFastAPIRoutes()
-        
         self.slack = App(
             token=os.getenv("SLACK_BOT_TOKEN"),
             signing_secret=os.getenv("SLACK_SIGNING_SECRET")
@@ -60,6 +58,9 @@ class SlackAIAgent:
         app_token = os.getenv("SLACK_APP_TOKEN")
         if app_token:
             self.socket_mode_handler = SocketModeHandler(self.slack, app_token)
+
+        self.app = FastAPI(lifespan=self.lifespan)
+        self.setupFastAPIRoutes()
         
         @self.slack.event('team_join')
         async def handle_team_join(event, logger):
@@ -103,6 +104,14 @@ class SlackAIAgent:
         close_async = getattr(self.socket_mode_handler, "close_async", None)
         if self.socket_mode_handler:
             await close_async
+
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI):
+        await self.start()
+        try:
+            yield
+        finally:
+            await self.stop()
     
     async def get_user_info(self, user_id: str) -> dict:
         result = self.web_client.users_info(user=user_id)
@@ -426,14 +435,6 @@ class SlackAIAgent:
         logging.info(f"Analysis posted to channel for {member['name']}")
     
     def setupFastAPIRoutes(self):
-        @self.app.on_event("startup")
-        async def startup():
-            await self.start()
-        
-        @self.app.on_event("shutdown")
-        async def shutdown():
-            await self.stop()
-        
         @self.app.get("/health")
         async def health():
             return {
@@ -482,8 +483,6 @@ class SlackAIAgent:
                 status_code=500,
                 content={"error": "Internal server error"}
             )
-            
-            
             
 class AnalyzeMemberRequest(BaseModel):
     memberInfo: dict
