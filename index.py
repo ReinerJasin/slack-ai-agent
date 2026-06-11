@@ -14,9 +14,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
-from slack_sdk import WebClient
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
 
 from db import (initDatabase, saveMemberAnalysis, markAsSentToSlack, close_database)
 
@@ -42,12 +42,12 @@ logging.basicConfig(level=logging.INFO)
 # Agent Class
 class SlackAIAgent:
     def __init__(self):
-        self.slack = App(
+        self.slack = AsyncApp(
             token=os.getenv("SLACK_BOT_TOKEN"),
             signing_secret=os.getenv("SLACK_SIGNING_SECRET")
         )
         
-        self.web_client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+        self.web_client = AsyncWebClient(token=os.getenv("SLACK_BOT_TOKEN"))
         
         self.openai = ChatOpenAI(
             model="gpt-4",
@@ -56,10 +56,6 @@ class SlackAIAgent:
         )
         
         self.socket_mode_handler = None
-        
-        app_token = os.getenv("SLACK_APP_TOKEN")
-        if app_token:
-            self.socket_mode_handler = SocketModeHandler(self.slack, app_token)
 
         self.app = FastAPI(lifespan=self.lifespan)
         self.setupFastAPIRoutes()
@@ -67,48 +63,54 @@ class SlackAIAgent:
         @self.slack.event('team_join')
         async def handle_team_join(event, logger):
             try:
-                # Log event
-                logging.info(f'New member joined: {event["user"]["name"] or event["user"]["real_name"] }')
-                
-                # Get detailed user information
-                user_info = await self.get_user_info(event["user"]["id"])
-                
-                # Analyze and post member
-                await self.analyzeAndPostMember(user_info)
+                user = event.get("user") or {}
+                user_id = user.get("id")
 
+                if not user_id:
+                    logging.error("team_join event missing user id: %s", event)
+                    return
+
+                logging.info("New member joined: %s", user.get("name") or user.get("real_name") or user_id)
+                user_info = await self.get_user_info(user_id)
+                await self.analyzeAndPostMember(user_info)
             except Exception as e:
                 logging.error(f'Error handling team_join: {e}')
         
         @self.slack.event('member_joined_channel')
         async def handle_member_joined_channel(event, logger):
             try:
-                if event["channel_type"] == "C":
-                    # Log event
-                    logging.info(f'Member {event["user"]} joined channel {event["channel"]}')
-                    
-                    # Get user info
-                    user_info = self.get_user_info(event["user"]["id"])
-                    
-                    # Analyze and post member
-                    await self.analyzeAndPostMember(user_info)
+                if event.get("channel_type") != "C":
+                    return
 
+                user_id = event.get("user")
+                channel_id = event.get("channel")
+
+                if not user_id:
+                    logging.error("member_joined_channel event missing user id: %s", event)
+                    return
+
+                logging.info("Member %s joined channel %s", user_id, channel_id)
+                user_info = await self.get_user_info(user_id)
+                await self.analyzeAndPostMember(user_info)
             except Exception as e:
                 logging.error(f'Error handling member_joined_channel: {e}')
     
     async def start(self):
         await initDatabase()
+
+        app_token = os.getenv("SLACK_APP_TOKEN")
+        if app_token and self.socket_mode_handler is None:
+            self.socket_mode_handler = AsyncSocketModeHandler(self.slack, app_token)
         
         if self.socket_mode_handler:
-            self.socket_mode_task = asyncio.create_task(
-                asyncio.to_thread(self.socket_mode_handler.start)
-            )
+            asyncio.create_task(self.socket_mode_handler.start_async())
             logging.info("Slack Socket Mode Handler Started")
             
     async def stop(self):
         if self.socket_mode_handler:
-            close = getattr(self.socket_mode_handler, "close", None)
-            if callable(close):
-                await asyncio.to_thread(close)
+            close_async = getattr(self.socket_mode_handler, "close_async", None)
+            if callable(close_async):
+                await close_async()
 
         await close_database()
 
@@ -121,7 +123,7 @@ class SlackAIAgent:
             await self.stop()
     
     async def get_user_info(self, user_id: str) -> dict:
-        result = await asyncio.to_thread(self.web_client.users_info, user=user_id)
+        result = await self.web_client.users_info(user=user_id)
         user = result["user"]
 
         return {
@@ -422,8 +424,7 @@ class SlackAIAgent:
             ]
         })
         
-        await asyncio.to_thread(
-            self.web_client.chat_postMessage,
+        await self.web_client.chat_postMessage(
             channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
             text=f"New Member Analysis: {member['name']} ({fitScore}/100)",
             attachments=[

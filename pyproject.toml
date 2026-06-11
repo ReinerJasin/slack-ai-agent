@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.12.14",
     "fastapi>=0.136.3",
     "langchain-openai>=1.2.2",
     "psycopg[binary,pool]>=3.3.4",
