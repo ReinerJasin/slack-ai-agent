@@ -8,23 +8,26 @@ from psycopg_pool import AsyncConnectionPool
 
 load_dotenv()
 
+# Create a shared async connection pool for the lifetime of the application.
 pool = AsyncConnectionPool(
     conninfo=os.getenv("DATABASE_URL"),
     min_size=1,
     max_size=20,
     timeout=2.0,
     max_idle=30,
-    kwargs={
-        "row_factory": dict_row,
-    },
+    kwargs={"row_factory": dict_row},
     open=False,
 )
 
+
 async def initDatabase():
+    """Open the database pool and ensure the required schema exists."""
     try:
+        # Open the pool before attempting any schema operations.
         await pool.open()
         logging.info("Database connection pool opened")
-        
+
+        # Create the main table and supporting indexes if this is a fresh database.
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -48,32 +51,38 @@ async def initDatabase():
                     );
                     """
                 )
-                
+
                 await cur.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_member_id ON member_analyses(member_id);
+                    CREATE INDEX IF NOT EXISTS idx_member_id
+                    ON member_analyses(member_id);
                     """
                 )
-                
+
                 await cur.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_analyzed_at ON member_analyses(analyzed_at);
+                    CREATE INDEX IF NOT EXISTS idx_analyzed_at
+                    ON member_analyses(analyzed_at);
                     """
                 )
-                
+
+            # Commit schema changes explicitly before returning control to the app.
             await conn.commit()
-            
+
         logging.info("Database schema initialized")
-        
     except Exception as error:
-        logging.error(f'Failed to initialize database: {error}')
+        # Bubble startup failures so the application does not run with a broken database.
+        logging.error("Failed to initialize database: %s", error)
         raise
-    
-    
+
+
 async def saveMemberAnalysis(member_info, analysis, research_data):
+    """Insert or update the latest analysis row for a given Slack member."""
     try:
+        # Reuse a pooled connection for the upsert-like save behavior.
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                # Look up the newest row for this member so repeat analyses update it.
                 await cur.execute(
                     """
                     SELECT id
@@ -87,6 +96,7 @@ async def saveMemberAnalysis(member_info, analysis, research_data):
                 existing = await cur.fetchone()
 
                 if existing:
+                    # Refresh the existing row when this member has already been analyzed before.
                     await cur.execute(
                         """
                         UPDATE member_analyses
@@ -119,6 +129,7 @@ async def saveMemberAnalysis(member_info, analysis, research_data):
                         ),
                     )
                 else:
+                    # Create a new row when this is the first analysis for the member.
                     await cur.execute(
                         """
                         INSERT INTO member_analyses (
@@ -147,23 +158,26 @@ async def saveMemberAnalysis(member_info, analysis, research_data):
                             Jsonb(research_data),
                         ),
                     )
-                
+
+                # Read the generated or updated row id for later Slack delivery tracking.
                 result = await cur.fetchone()
-                
+
+            # Commit the write transaction once the row has been stored successfully.
             await conn.commit()
-            
+
         analysis_id = result["id"]
-        
-        logging.info(f'Saved analysis to database with ID: {analysis_id}')
-        
+        logging.info("Saved analysis to database with ID: %s", analysis_id)
         return analysis_id
-        
     except Exception as error:
-        logging.error(f'Failed to initialize database: {error}')
+        # Propagate persistence failures so callers can treat them as hard errors.
+        logging.error("Failed to save member analysis: %s", error)
         raise
-    
+
+
 async def markAsSentToSlack(analysis_id):
+    """Mark a saved analysis row as successfully delivered to Slack."""
     try:
+        # Update the delivery flags after the Slack post has completed successfully.
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -178,14 +192,16 @@ async def markAsSentToSlack(analysis_id):
                     (analysis_id,),
                 )
 
+            # Commit the delivery-state update before returning.
             await conn.commit()
-
     except Exception as error:
-        logging.error(f"Failed to mark as sent to Slack: {error}")
+        # Delivery tracking failures should be visible to callers and logs.
+        logging.error("Failed to mark as sent to Slack: %s", error)
         raise
 
 
 async def close_database():
+    """Close the shared async connection pool during application shutdown."""
+    # Release all pooled PostgreSQL connections before the process exits.
     await pool.close()
     logging.info("Database connection pool closed")
-    
