@@ -141,7 +141,7 @@ async def saveMemberAnalysis(member_info, analysis, research_data):
                             member_info.get("email"),
                             member_info.get("title"),
                             member_info.get("timezone"),
-                            analysis["fit_score"],
+                            analysis["fitScore"],
                             Jsonb(analysis["insights"]),
                             Jsonb(analysis["recommendations"]),
                             Jsonb(research_data),

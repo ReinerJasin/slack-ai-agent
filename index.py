@@ -22,20 +22,22 @@ from db import (initDatabase, saveMemberAnalysis, markAsSentToSlack, close_datab
 
 load_dotenv()
 
-# Log
-class Logger:
-    @staticmethod
-    def info(msg, *args):
-        print(f"[INFO] {msg}", *args)
+logging.basicConfig(level=logging.INFO)
 
-    @staticmethod
-    def error(msg, *args):
-        print(f"[ERROR] {msg}", *args)
+# Custom Log
+# class Logger:
+#     @staticmethod
+#     def info(msg, *args):
+#         print(f"[INFO] {msg}", *args)
+
+#     @staticmethod
+#     def error(msg, *args):
+#         print(f"[ERROR] {msg}", *args)
         
-    @staticmethod
-    def debug(msg, *args):
-        if os.getenv("NODE_ENV") == "development":
-            print(f"[DEBUG] {msg}", *args)
+#     @staticmethod
+#     def debug(msg, *args):
+#         if os.getenv("NODE_ENV") == "development":
+#             print(f"[DEBUG] {msg}", *args)
 
 # Agent Class
 class SlackAIAgent:
@@ -97,13 +99,18 @@ class SlackAIAgent:
         await initDatabase()
         
         if self.socket_mode_handler:
-            asyncio.create_task(self.socket_mode_handler.start_async())
+            self.socket_mode_task = asyncio.create_task(
+                asyncio.to_thread(self.socket_mode_handler.start)
+            )
             logging.info("Slack Socket Mode Handler Started")
             
     async def stop(self):
-        close_async = getattr(self.socket_mode_handler, "close_async", None)
         if self.socket_mode_handler:
-            await close_async
+            close = getattr(self.socket_mode_handler, "close", None)
+            if callable(close):
+                await asyncio.to_thread(close)
+
+        await close_database()
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -114,7 +121,7 @@ class SlackAIAgent:
             await self.stop()
     
     async def get_user_info(self, user_id: str) -> dict:
-        result = self.web_client.users_info(user=user_id)
+        result = await asyncio.to_thread(self.web_client.users_info, user=user_id)
         user = result["user"]
 
         return {
@@ -157,18 +164,12 @@ class SlackAIAgent:
                 await markAsSentToSlack(analysisId)
         
         except Exception as e:
-            logging.error(f'Error processing {member_info['name']}:', e.message)
-            
-            if analysisId:
-                logging.info(f'Analysis {analysisId} saved to database but nore sent to Slack due to error')
-                
-            raise
-            
-        except Exception as e:
-            logging.error(f'Error processing {member_info['name']}: {e}')
+            logging.error(f"Error processing {member_info.get('name', 'unknown member')}: {e}")
             
             if analysisId:
                 logging.info(f'Analysis {analysisId} saved to database but not sent to Slack due to error')
+
+            raise
     
     async def doBasicResearch(self, user_info:dict):
         result = []
@@ -188,7 +189,7 @@ class SlackAIAgent:
                 
                 ### GITHUB INFO ###
                 if user_info["name"]:
-                    github_info = await self.getGithubInfo(domain)
+                    github_info = await self.getGithubInfo(user_info["name"])
                     
                     if github_info:
                         result.append(github_info)
@@ -266,7 +267,7 @@ class SlackAIAgent:
             
             
             response.raise_for_status()
-            return response.text
+            return response.json()
         
         try:
             data = await asyncio.to_thread(_fetch)
@@ -421,7 +422,8 @@ class SlackAIAgent:
             ]
         })
         
-        await self.web_client.chat_postMessage(
+        await asyncio.to_thread(
+            self.web_client.chat_postMessage,
             channel=os.getenv("SLACK_PRIVATE_CHANNEL_ID"),
             text=f"New Member Analysis: {member['name']} ({fitScore}/100)",
             attachments=[
@@ -429,7 +431,7 @@ class SlackAIAgent:
                     "color": color,
                     "blocks": blocks
                 }
-            ]
+            ],
         )
         
         logging.info(f"Analysis posted to channel for {member['name']}")
@@ -444,9 +446,9 @@ class SlackAIAgent:
             
         if os.getenv("NODE_ENV") == 'development':
             @self.app.post("/test/analyze-member")
-            async def test_analyze_member(request, response):
+            async def test_analyze_member(payload: AnalyzeMemberRequest):
                 try:
-                    member_info = request["memberInfo"]
+                    member_info = payload.memberInfo
                     
                     if not member_info:
                         raise HTTPException(
@@ -486,3 +488,6 @@ class SlackAIAgent:
             
 class AnalyzeMemberRequest(BaseModel):
     memberInfo: dict
+
+agent = SlackAIAgent()
+app = agent.app
