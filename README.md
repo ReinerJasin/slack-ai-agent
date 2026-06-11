@@ -221,6 +221,22 @@ slack-ai-agent
 - The current AI prompt is designed for commercial-fit analysis of new members.
 - The same architecture can be adapted for other Slack workflows such as onboarding, moderation, or community analytics.
 
+## AI Attribution
+
+This project was first modified by me based on the overall code structure and workflow shown in the freeCodeCamp reference video, which was originally built with Node.js.
+
+After that initial adaptation, I used AI to help polish the pipeline, improve the implementation, and fix errors. I then reviewed the result myself.
+
+Because Python and Node.js differ in how application flow, libraries, and concurrency are handled, the system also had to be adjusted to fit Python properly, especially around asynchronous behavior and event-driven execution.
+
+The current codebase reflects that adaptation and review process rather than a direct one-to-one translation from the original Node.js version.
+
+## Support The Project
+
+If this project helped you, consider starring the repository.
+
+If you have feedback, ideas for improvement, or want to share how you adapted the workflow, feel free to open an issue or reach out through the repository.
+
 ## Reference
 
 - Original video inspiration: [Build Your Own AI Agent – Full Course with OpenAI, Langchain, Render Deployment by freeCodeCamp.org and Code with Ania Kubów](https://www.youtube.com/watch?v=MnG0ugK2JAI)
